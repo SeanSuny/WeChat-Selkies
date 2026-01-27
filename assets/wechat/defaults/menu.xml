@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+<menu id="root-menu" label="MENU">
+<item label="WeChat" icon="/usr/share/icons/hicolor/128x128/apps/wechat.png"><action name="Execute"><command>/scripts/wechat/wechat-restart.sh</command></action></item>
+</menu>
+</openbox_menu>

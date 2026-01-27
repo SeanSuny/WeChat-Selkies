@@ -1,0 +1,93 @@
+name: Auto Build WeChat Selkies
+
+on:
+  schedule:
+    - cron: '55 2 * * *'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: seansuny/wechat-selkies
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. 获取并验证版本号
+      - name: Get Remote WeChat Version
+        id: remote
+        run: |
+          URL="https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
+          curl -sL --retry 3 -r 0-2097152 "$URL" -o /tmp/partial.deb
+          VERSION=$(dpkg-deb --field /tmp/partial.deb Version)
+          if [ -n "$VERSION" ]; then
+            echo "✅ 快速探测成功版本号: $VERSION"
+          else
+            echo "⚠️ 快速探测失败（文件头不完整），执行全量下载..."
+            rm -f /tmp/partial.deb
+            curl -sL --retry 3 "$URL" -o /tmp/full.deb
+            VERSION=$(dpkg-deb --field /tmp/full.deb Version)
+            if [ -z "$VERSION" ]; then
+              echo "❌ 无法获取版本号，终止构建！"
+              exit 1
+            fi
+            echo "✅ 全量下载解析版本号: $VERSION"
+          fi
+          echo "OFFICIAL_VERSION=$VERSION" >> $GITHUB_ENV
+
+      # 2. 检查 Docker Hub 标签
+      - name: Check Docker Hub Tag
+        id: check_tag
+        run: |
+          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://hub.docker.com/v2/repositories/${{ env.IMAGE_NAME }}/tags/${{ env.OFFICIAL_VERSION }}/)
+          
+          if [ "$STATUS_CODE" -eq 200 ]; then
+            echo "EXISTS=true" >> $GITHUB_ENV
+            echo "⚠️ Docker Hub 上已存在版本 ${{ env.OFFICIAL_VERSION }}，跳过构建！"
+          else
+            echo "EXISTS=false" >> $GITHUB_ENV
+            echo "✅ 最新的版本 ${{ env.OFFICIAL_VERSION }}，准备构建！"
+          fi
+
+      # 3. 准备构建环境
+      - name: Set up QEMU
+        if: env.EXISTS == 'false'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: env.EXISTS == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: env.EXISTS == 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # 4. 修正权限
+      - name: Fix script permissions
+        if: env.EXISTS == 'false'
+        run: |
+          if [ -d "assets/wechat" ]; then
+            find assets/wechat -type d -exec chmod 755 {} +
+            find assets/wechat -type f -exec chmod 755 {} +
+          fi
+
+      # 5. 执行构建与推送
+      - name: Build and Push
+        if: env.EXISTS == 'false'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ env.OFFICIAL_VERSION }}
+          build-args: |
+            VERSION=${{ env.OFFICIAL_VERSION }}
+            BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')

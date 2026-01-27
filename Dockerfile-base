@@ -1,0 +1,170 @@
+# syntax=docker/dockerfile:1
+
+# ---------------------------------------------------------
+# 阶段 1: 获取 XVFB
+# ---------------------------------------------------------
+FROM lscr.io/linuxserver/xvfb:debiantrixie AS xvfb
+
+# ---------------------------------------------------------
+# 阶段 2: 构建 Selkies 前端
+# ---------------------------------------------------------
+FROM ghcr.io/linuxserver/baseimage-alpine:3.22 AS frontend
+
+RUN \
+  echo "**** install build packages ****" && \
+  apk add --no-cache cmake git nodejs npm
+
+RUN \
+  echo "**** ingest code ****" && \
+  git clone https://github.com/selkies-project/selkies.git /src && \
+  cd /src && \
+  git checkout -f 3ff61d3cc017e8492630bf0db2449bc556e20f2e
+
+RUN \
+  echo "**** build shared core library ****" && \
+  cd /src/addons/gst-web-core && \
+  npm install && \
+  npm run build && \
+  echo "**** build dashboards ****" && \
+  # 只保留标准 dashboard
+  DASHBOARDS="selkies-dashboard" && \
+  mkdir /buildout && \
+  for DASH in $DASHBOARDS; do \
+    cd /src/addons/$DASH && \
+    cp ../gst-web-core/dist/selkies-core.js src/ && \
+    npm install && \
+    npm run build && \
+    mkdir -p dist/src dist/nginx && \
+    cp ../gst-web-core/dist/selkies-core.js dist/src/ && \
+    cp ../universal-touch-gamepad/universalTouchGamepad.js dist/src/ && \
+    cp ../gst-web-core/nginx/* dist/nginx/ && \
+    cp -r ../gst-web-core/dist/jsdb dist/ && \
+    mkdir -p /buildout/$DASH && \
+    cp -ar dist/* /buildout/$DASH/; \
+  done
+
+# ---------------------------------------------------------
+# 阶段 3: 运行时环境 (基于 Debian Trixie)
+# ---------------------------------------------------------
+FROM ghcr.io/linuxserver/baseimage-debian:trixie
+
+# Docker Buildx 会自动传入 TARGETARCH (amd64, arm64, etc.)
+ARG TARGETARCH
+ARG BUILD_DATE
+LABEL org.opencontainers.image.maintainer="Sean"
+LABEL org.opencontainers.image.description="baseimage-selkies-slim-debian"
+LABEL org.opencontainers.image.created=$BUILD_DATE
+
+ENV DISPLAY=:1 \
+    PERL5LIB=/usr/local/bin \
+    HOME=/config \
+    PULSE_RUNTIME_PATH=/defaults \
+    SELKIES_INTERPOSER=/usr/lib/selkies_joystick_interposer.so \
+    NVIDIA_DRIVER_CAPABILITIES=all \
+    # 显式声明语言环境，防止乱码
+    LANG=zh_CN.UTF-8 \
+    LANGUAGE=zh_CN:en \
+    LC_ALL=zh_CN.UTF-8 \
+    TITLE=Selkies \
+    # 隐藏应用程序
+    SELKIES_UI_SIDEBAR_SHOW_APPS="false" \
+    # 隐藏共享
+    SELKIES_UI_SIDEBAR_SHOW_SHARING="false" \
+    SELKIES_ENABLE_SHARING="false" \
+    # 禁用手柄
+    NO_GAMEPAD="true" \
+    # 开启剪切板图像支持
+    SELKIES_CLIPBOARD_IMAGE="true"
+
+# 安装核心依赖
+RUN echo "**** install minimal runtime deps ****" && \
+  apt-get update && \
+  # [1] 系统基础
+  PACKAGES="breeze-cursor-theme ca-certificates sudo curl gcc make nginx-extras python3 python3-dev python3-venv libxkbcommon-dev" && \
+  # [2] 输入法和剪贴板
+  PACKAGES="$PACKAGES xdotool xcvt xclip xsel libxtst6" && \
+  # [3] 修复中文乱码和显示
+  PACKAGES="$PACKAGES fonts-noto-cjk fonts-noto-color-emoji xfonts-base locales xsettingsd" && \
+  # [4] 窗口管理与桌面基础
+  PACKAGES="$PACKAGES openbox dbus-x11 xauth x11-common x11-xkb-utils x11-utils x11-xserver-utils xserver-xorg-core xserver-common" && \
+  # [5] 微信音频支持
+  PACKAGES="$PACKAGES pulseaudio pulseaudio-utils libasound2" && \
+  # [6] 微信运行所需库
+  PACKAGES="$PACKAGES libgtk-3-0 libnss3 libgbm1 libnotify-bin zlib1g" && \
+  # [7] 显卡驱动与渲染加速
+  PACKAGES="$PACKAGES libgl1-mesa-dri libglu1-mesa mesa-vulkan-drivers mesa-va-drivers libnvidia-egl-wayland1 libvulkan1" && \
+  # [8] X11 显卡硬件驱动
+  PACKAGES="$PACKAGES xserver-xorg-video-amdgpu xserver-xorg-video-ati xserver-xorg-video-nouveau xserver-xorg-video-qxl" && \
+  # 根据架构动态添加 Intel 驱动 (仅 AMD64 需要)
+  if [ "$TARGETARCH" = "amd64" ]; then \
+    echo "Architecture is amd64, adding Intel drivers..." && \
+    PACKAGES="$PACKAGES intel-media-va-driver xserver-xorg-video-intel"; \
+  else \
+    echo "Architecture is $TARGETARCH, skipping Intel drivers..."; \
+  fi && \
+  \
+  DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y $PACKAGES && \
+  \
+  echo "**** generate locales ****" && \
+  sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+  sed -i -e 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen && \
+  locale-gen && \
+  \
+  echo "**** install selkies (python part) ****" && \
+  # 下载并安装 Selkies Python 组件
+  curl -o /tmp/selkies.tar.gz -L "https://github.com/selkies-project/selkies/archive/3ff61d3cc017e8492630bf0db2449bc556e20f2e.tar.gz" && \
+  cd /tmp && \
+  tar xf selkies.tar.gz && \
+  cd selkies-* && \
+  # 清理 pyproject.toml 依赖
+  sed -i '/"av>/d' pyproject.toml && \
+  sed -i '/cryptography/d' pyproject.toml && \
+  python3 -m venv --system-site-packages /lsiopy && \
+  /lsiopy/bin/pip install . setuptools && \
+  \
+  echo "**** install selkies interposer ****" && \
+  cd addons/js-interposer && \
+  gcc -shared -fPIC -ldl -o selkies_joystick_interposer.so joystick_interposer.c && \
+  mv selkies_joystick_interposer.so /usr/lib/selkies_joystick_interposer.so && \
+  \
+  echo "**** install selkies fake udev ****" && \
+  cd ../fake-udev && \
+  make && \
+  mkdir -p /opt/lib && \
+  mv libudev.so.1.0.0-fake /opt/lib/ && \
+  \
+  echo "**** config openbox ****" && \
+  mkdir -p /etc/xdg/openbox && \
+  # 下面的 sed 命令是基于原版逻辑修改默认配置
+  if [ -f /etc/xdg/openbox/rc.xml ]; then \
+    sed -i -e 's/<number>4<\/number>/<number>1<\/number>/' /etc/xdg/openbox/rc.xml; \
+  fi && \
+  mkdir -p /usr/share/selkies/selkies-dashboard && \
+  mkdir -p /etc/xdg/openbox && \
+  ln -sf /usr/share/selkies/selkies-dashboard /usr/share/selkies/web  && \
+  \
+  echo "**** cleanup ****" && \
+  # 移除编译工具，保留运行时
+  apt-get purge -y --autoremove \
+    python3-dev \
+    gcc \
+    make \
+    libxkbcommon-dev && \
+  apt-get clean && \
+  rm -rf \
+    /config/.cache \
+    /var/lib/apt/lists/* \
+    /var/tmp/* \
+    /tmp/*
+
+# 复制本地文件
+COPY /assets/root /
+COPY --from=frontend /buildout /usr/share/selkies
+COPY --from=xvfb / /
+
+# 隐藏顶栏手柄按钮
+RUN sed -i '/<\/head>/i <style> button:has(path[d="M15 7.5V2H9v5.5l3 3 3-3zM7.5 9H2v6h5.5l3-3-3-3zM9 16.5V22h6v-5.5l-3-3-3 3zM16.5 9l-3 3 3 3H22V9h-5.5z"]) { display: none !important; } </style>' /usr/share/selkies/web/index.html
+
+# 端口和卷
+EXPOSE 3001
+VOLUME /config
