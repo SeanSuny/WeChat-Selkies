@@ -22,7 +22,7 @@
 Docker Hub镜像：
 
 ```bash
-docker run -it -p 3001:3001 -v ./config:/config --device /dev/dri:/dev/dri SeanSuny/wechat-selkies:latest
+docker run -it -p 3001:3001 -v ./config:/config --device /dev/dri:/dev/dri seansuny/wechat-selkies:latest
 ```
 
 ### docker-compose 部署
@@ -39,7 +39,7 @@ docker run -it -p 3001:3001 -v ./config:/config --device /dev/dri:/dev/dri SeanS
    ```yaml
     services:
       wechat-selkies:
-        image: SeanSuny/wechat-selkies:latest
+        image: seansuny/wechat-selkies:latest
         container_name: wechat-selkies
         ports:
           - "3001:3001"
